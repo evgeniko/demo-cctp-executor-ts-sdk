@@ -1,0 +1,21 @@
+{
+  "name": "demo-cctp-executor-ts-sdk",
+  "version": "1.0.0",
+  "description": "Cross-chain USDC transfers via official Wormhole CCTP + Executor contracts",
+  "type": "module",
+  "scripts": {
+    "transfer": "tsx src/cctp-transfer.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "binary-layout": "^1.3.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.8.0"
+  }
+}
