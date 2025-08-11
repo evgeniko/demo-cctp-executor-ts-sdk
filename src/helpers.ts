@@ -2,6 +2,7 @@
 
 import { Layout, serialize } from 'binary-layout';
 import { Buffer } from 'buffer';
+import bs58 from 'bs58';
 
 // Binary layout definitions for relay instructions
 const gasInstructionLayout = [
@@ -40,27 +41,43 @@ export function addressToBytes32(address: string): string {
   return '0x' + '000000000000000000000000' + address.slice(2).toLowerCase();
 }
 
-// Create Solana relay instructions (Type 1, manual claim)
-export function createSolanaRelayInstructions(gasLimit: number = 1400000, msgValue: number = 0): string {
+export function createSolanaRelayInstructions(gasLimit: bigint, msgValue: bigint, recipient?: string, dropOff: bigint = 0n): string {
+  const instructions: any[] = [{ request: { type: "GasInstruction", gasLimit, msgValue } }];
+  
+  // Add GasDropOffInstruction if recipient is provided (enables automatic ATA creation by relayer)
+  if (recipient && dropOff > 0n) {
+    // Convert Solana address to bytes32 format
+    const decoded = Buffer.from(bs58.decode(recipient));
+    const recipientBytes32 = `0x${decoded.toString('hex').padStart(64, '0')}`;
+    
+    instructions.push({ 
+      request: { 
+        type: "GasDropOffInstruction", 
+        dropOff, // Amount to drop off (minimum rent exemption for ATA creation)
+        recipient: recipientBytes32
+      } 
+    });
+  }
+  
   const relayInstructions = serialize(relayInstructionsLayout, {
-    requests: [{ request: { type: "GasInstruction", gasLimit: BigInt(gasLimit), msgValue: BigInt(msgValue) } }],
+    requests: instructions,
   });
   return '0x' + Buffer.from(relayInstructions).toString('hex');
 }
 
 // Create EVM relay instructions (Type 2, auto-delivery)
-export function createEVMRelayInstructions(recipient: string, gasLimit: number, dropOff: number = 0): string {
-  const msgValue = 0;
+export function createEVMRelayInstructions(recipient: string, gasLimit: bigint, dropOff: bigint = 0n): string {
+  const msgValue = 0n;
   
   // Create instructions array
-  const instructions: any[] = [{ request: { type: "GasInstruction", gasLimit: BigInt(gasLimit), msgValue: BigInt(msgValue) } }];
+  const instructions: any[] = [{ request: { type: "GasInstruction", gasLimit, msgValue } }];
   
   // Only include GasDropOffInstruction if dropOff > 0
-  if (dropOff > 0) {
+  if (dropOff > 0n) {
     instructions.push({ 
       request: { 
         type: "GasDropOffInstruction", 
-        dropOff: BigInt(dropOff), 
+        dropOff, 
         recipient: addressToBytes32(recipient) 
       } 
     });
@@ -73,37 +90,13 @@ export function createEVMRelayInstructions(recipient: string, gasLimit: number, 
   return '0x' + Buffer.from(relayInstructions).toString('hex');
 }
 
-// Solana helper functions
-
-// Base58 decoder for Solana addresses
-export function base58Decode(str: string): string {
-  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let result = 0n;
-  for (let i = 0; i < str.length; i++) {
-    const index = alphabet.indexOf(str[i]);
-    if (index === -1) throw new Error('Invalid base58 character');
-    result = result * 58n + BigInt(index);
+// Convert Solana address to bytes32 format
+export function addressToBytes32WithSolana(address: string): string {
+  try {
+    const decoded = Buffer.from(bs58.decode(address));
+    return `0x${decoded.toString('hex').padStart(64, '0')}`;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`Failed to decode Solana address: ${errorMessage}`);
   }
-  const bytes: number[] = [];
-  while (result > 0n) {
-    bytes.unshift(Number(result % 256n));
-    result = result / 256n;
-  }
-  for (let i = 0; i < str.length && str[i] === '1'; i++) bytes.unshift(0);
-  return '0x' + Buffer.from(bytes).toString('hex').padStart(64, '0');
 }
-
-// Legacy Solana relay instructions (deprecated - use createSolanaRelayInstructions instead)
-export function createSolanaRelayInstructionsLegacy(gasLimit: number = 1400000, msgValue: number = 0): string {
-  const gasLimitHex = gasLimit.toString(16).padStart(32, '0');
-  const msgValueHex = msgValue.toString(16).padStart(32, '0');
-  return '0x01' + gasLimitHex + msgValueHex;
-}
-
-// Legacy EVM relay instructions (deprecated - use createEVMRelayInstructions instead)
-export function createEVMRelayInstructionsLegacy(recipient: string, dropOff: number = 0): string {
-  // Convert address to bytes32 for EVM
-  const recipientHex = '0x' + '000000000000000000000000' + recipient.slice(2).toLowerCase();
-  const dropOffHex = dropOff.toString(16).padStart(32, '0');
-  return '0x02' + dropOffHex + recipientHex.replace('0x', '');
-} 

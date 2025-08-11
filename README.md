@@ -38,7 +38,7 @@ Cross-chain USDC transfers via official Wormhole CCTP + Executor contracts.
 
 ## Transfer Parameters
 
-You can also customize these parameters in `cctp-transfer.ts`:
+You can customize these parameters in `cctp-transfer.ts`:
 
 ```typescript
 const TOKEN_AMOUNT = '0.21';  // Amount of USDC to transfer
@@ -59,4 +59,24 @@ The script includes automatic gas estimation with a 200% buffer:
 ```typescript
 const GAS_BUFFER_PERCENTAGE = 200; // 200% buffer
 const MIN_GAS_LIMIT = 1000000n; // 1M gas minimum
+```
+
+## Chain-Specific Configuration
+
+### EVM Chains 
+- **`msgValue`**: Always `0` - EVM chains don't use msgValue for CCTP transfers
+- **`gasLimit`**: Determines transaction costs and priority fees
+
+### Solana
+- **`msgValue`**: Calculated based on Solana operation costs
+- **`gasLimit`**: `250,000` compute units set
+
+
+## Additional Files
+
+### `src/generate-solana-key.ts`
+Utility script for generating Solana private keys in base58 format. Useful for testing and development on Solana devnet.
+
+```bash
+npx tsx src/generate-solana-key.ts
 ```

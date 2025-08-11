@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import { parseUnits, Wallet, Contract, JsonRpcProvider } from 'ethers';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddress } from '@solana/spl-token';
 import axios from 'axios';
 import { 
   USDC_ADDRESSES, 
@@ -9,25 +11,24 @@ import {
   WORMHOLE_CHAIN_IDS
 } from './constants.js';
 import { 
-  addressToBytes32, 
+  addressToBytes32,
+  addressToBytes32WithSolana,
   createSolanaRelayInstructions, 
-  createEVMRelayInstructions 
+  createEVMRelayInstructions
 } from './helpers.js';
-
-console.log("🚀 CCTP Executor Transfer");
 
 // TODO: CONFIGURATION SECTION
 // Only change these two variables to configure the transfer
 const SOURCE_CHAIN = 'BASE_SEPOLIA';
-const DESTINATION_CHAIN = 'ETHEREUM_SEPOLIA';
+const DESTINATION_CHAIN = 'SOLANA_DEVNET'; 
 // Transfer parameters
-const TOKEN_AMOUNT = '0.13';
-const RECIPIENT = '0x87E27607eF776Df3d76a817b30B0b27da6B8afF1';
+const TOKEN_AMOUNT = '0.131';
+const RECIPIENT = '6wqdVJ4wGCnQBqQxY44NV829m1qn8eSDy52zDh5TuFz7'
+// const RECIPIENT = '0x87E27607eF776Df3d76a817b30B0b27da6B8afF1'; 
+
 // API endpoints
 const EXECUTOR_API = 'https://executor-testnet.labsapis.com'; // Change to 'https://executor.labsapis.com' for mainnet
-// Gas configuration
-const GAS_BUFFER_PERCENTAGE = 200; // 200% buffer
-const MIN_GAS_LIMIT = 1000000n; // 1M gas minimum
+const SOLANA_GAS_LIMIT = 250000; 
 
 // Get chain configuration
 function getChainConfig(chainName: string) {
@@ -51,18 +52,74 @@ const CCTP_ABI = [
   'function depositForBurn(uint256 amount, uint16 destinationChain, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, tuple(address refundAddress, bytes signedQuote, bytes instructions) executorArgs, tuple(uint16 dbps, address payee) feeArgs) external payable returns (uint64 nonce)'
 ];
 
+// Check if Solana ATA exists
+async function checkSolanaATAExists(recipient: string): Promise<boolean> {
+  try {
+    const connection = new Connection(RPC_URLS.SOLANA_DEVNET, 'confirmed');
+    const recipientPubkey = new PublicKey(recipient);
+    const usdcMint = new PublicKey(USDC_ADDRESSES.SOLANA_DEVNET);
+    const ata = await getAssociatedTokenAddress(usdcMint, recipientPubkey);
+    
+    // Check if the account exists
+    const accountInfo = await connection.getAccountInfo(ata);
+    return accountInfo !== null;
+  } catch (error) {
+    console.log('Error checking ATA existence:', error);
+    return false;
+  }
+}
+
+// Get minimum rent exemption for token accounts
+async function getMinimumRentExemption(): Promise<number> {
+  try {
+    const connection = new Connection(RPC_URLS.SOLANA_DEVNET, 'confirmed');
+    const dataLength = 165;
+    const minBalForRentExemption = await connection.getMinimumBalanceForRentExemption(dataLength);
+    console.log(`Minimum rent exemption for ${dataLength} bytes: ${minBalForRentExemption} lamports`);
+    return minBalForRentExemption;
+  } catch (error) {
+    console.log('Error getting minimum rent exemption, using fallback value');
+    return 2039280; 
+  }
+}
+
 // Get quote from executor API
 async function getExecutorQuote(srcChainId: number, dstChainId: number, recipient: string, gasLimit: number) {
-  const relayInstructions = dstChainId === 1 
-    ? createSolanaRelayInstructions()
-    : createEVMRelayInstructions(recipient, gasLimit);
-  
+  let relayInstructions;
+  if (dstChainId === 1) {
+    // Check if ATA exists first
+    const ataExists = await checkSolanaATAExists(recipient);
+    
+    // Calculate msgValue based on working implementation pattern
+    let msgValue = 5001n; // SOLANA_MSG_VALUE_BASE_FEE
+    
+
+    // TODO: Add extra for CCTP v2 operations
+    // msgValue += 1_200_000n;  
+    if (!ataExists) {
+      const minimumRent = await getMinimumRentExemption();
+      msgValue += BigInt(minimumRent);
+    }
+    console.log(`Using calculated msgValue: ${msgValue} lamports (${Number(msgValue) / 1e9} SOL)`);
+    
+    // Create relay instructions with calculated msgValue
+    if (!ataExists) {
+      console.log('ATA does not exist. Adding GasDropOffInstruction to enable automatic ATA creation.');
+      const minimumRent = await getMinimumRentExemption();
+      relayInstructions = createSolanaRelayInstructions(BigInt(gasLimit), msgValue, recipient, BigInt(minimumRent));
+    } else {
+      relayInstructions = createSolanaRelayInstructions(BigInt(gasLimit), msgValue);
+    }
+  } else {
+    relayInstructions = createEVMRelayInstructions(recipient, BigInt(gasLimit));
+  }
+
   const response = await axios.post(`${EXECUTOR_API}/v0/quote`, {
     srcChain: srcChainId,
     dstChain: dstChainId,
     relayInstructions
   });
-  
+
   return {
     signedQuote: response.data.signedQuote,
     relayInstructions,
@@ -75,30 +132,20 @@ async function approveUSDC(usdc: Contract, amount: bigint, walletAddress: string
   const allowance = await usdc.allowance(walletAddress, cctpContract);
   
   if (allowance < amount) {
-    console.log('🔐 Approving USDC...');
     const approveTx = await usdc.approve(cctpContract, '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff');
     await approveTx.wait();
-    console.log('✅ Approved with unlimited allowance!\n');
+    console.log('Approved USDC with unlimited allowance!\n');
   }
-}
-
-// Calculate final gas limit with buffer
-function calculateGasLimit(estimatedGas: bigint): bigint {
-  const gasLimit = estimatedGas + (estimatedGas * BigInt(GAS_BUFFER_PERCENTAGE) / 100n);
-  console.log(`⛽ Estimated gas: ${estimatedGas}, Using: ${gasLimit} (${GAS_BUFFER_PERCENTAGE}% buffer)`);
-  
-  const finalGasLimit = gasLimit > MIN_GAS_LIMIT ? gasLimit : MIN_GAS_LIMIT;
-  console.log(`⛽ Final gas limit: ${finalGasLimit}\n`);
-  
-  return finalGasLimit;
 }
 
 async function main() {
   const srcConfig = getChainConfig(SOURCE_CHAIN);
   const dstConfig = getChainConfig(DESTINATION_CHAIN);
 
-  console.log(`💰 Amount: ${TOKEN_AMOUNT} USDC`);
-  console.log(`📨 Recipient: ${RECIPIENT}`);
+  console.log(`Amount: ${TOKEN_AMOUNT} USDC`);
+  console.log(`Recipient: ${RECIPIENT}`);
+  console.log(`Source Chain: ${SOURCE_CHAIN} (Chain ID: ${srcConfig.chainId})`);
+  console.log(`Destination Chain: ${DESTINATION_CHAIN} (Chain ID: ${dstConfig.chainId})`); 
 
   // Setup
   const provider = new JsonRpcProvider(srcConfig.rpcUrl);
@@ -107,7 +154,7 @@ async function main() {
   
   const usdc = new Contract(srcConfig.usdcAddress, USDC_ABI, wallet);
   const balance = await usdc.balanceOf(wallet.address);
-  console.log(`💰 USDC Balance: ${parseFloat(balance.toString()) / 1e6} USDC\n`);
+  console.log(`USDC Balance: ${parseFloat(balance.toString()) / 1e6} USDC\n`);
   
   if (balance < tokenAmount) {
     throw new Error(`Insufficient USDC balance`);
@@ -116,38 +163,42 @@ async function main() {
   // Approve USDC if needed
   await approveUSDC(usdc, tokenAmount, wallet.address, srcConfig.executorAddress);
 
-  // Execute transfer
+  // Convert recipient address to bytes32 format based on destination chain
+  const recipientBytes32 = dstConfig.chainId === 1 
+    ? addressToBytes32WithSolana(RECIPIENT)  // Solana destination
+    : addressToBytes32(RECIPIENT);  // EVM destination
   const contract = new Contract(srcConfig.executorAddress, CCTP_ABI, wallet);
   
-  // Get executor quote with reasonable gas limit
-  console.log('💰 Getting quote...');
-  const { signedQuote, relayInstructions, estimatedCost } = await getExecutorQuote(srcConfig.chainId, dstConfig.chainId, RECIPIENT, 400000);
-  console.log(`✅ Quote: ${estimatedCost} wei\n`);
+  // Get executor quote with appropriate gas limit
+  const gasLimit = dstConfig.chainId === 1 ? SOLANA_GAS_LIMIT : 400000;
+  const { signedQuote, relayInstructions: initialRelayInstructions, estimatedCost } = await getExecutorQuote(srcConfig.chainId, dstConfig.chainId, RECIPIENT, gasLimit);
+  console.log(`Quote: ${estimatedCost} wei\n`);
   
-  console.log('🚀 Executing transfer...');
   const tx = await contract.depositForBurn(
     tokenAmount,
     dstConfig.chainId,
     dstConfig.domain,
-    addressToBytes32(RECIPIENT),
+    recipientBytes32,
     srcConfig.usdcAddress,
-    [wallet.address, signedQuote, relayInstructions],
+    [wallet.address, signedQuote, initialRelayInstructions],
     [0, '0x0000000000000000000000000000000000000000'], 
-    { value: estimatedCost, gasLimit: 500000 }
+    { value: estimatedCost, gasLimit }
   );
 
-  console.log(`📝 Transaction: ${tx.hash}`);
-  console.log('⏳ Waiting for confirmation...');
-  
+  console.log(`Transaction: ${tx.hash}`);
+  console.log('Waiting for confirmation...');
   const receipt = await tx.wait();
   
   if (receipt?.status === 1) {
-    console.log(`✅ Transferred ${TOKEN_AMOUNT} USDC`);
-    console.log(`⛽ tx hash: ${tx.hash}`);
-    
+    console.log(`tx hash: ${tx.hash}`);    
     const encodedEndpoint = encodeURIComponent(EXECUTOR_API);
     const env = EXECUTOR_API.includes('testnet') ? 'Testnet' : 'Mainnet';
-    console.log(`📊 Track: https://wormholelabs-xyz.github.io/executor-explorer/#/tx/${tx.hash}?endpoint=${encodedEndpoint}&env=${env}`);
+    console.log(`Track: https://wormholelabs-xyz.github.io/executor-explorer/#/tx/${tx.hash}?endpoint=${encodedEndpoint}&env=${env}`);
+    
+    // Additional info for Solana transfers
+    if (dstConfig.chainId === 1) {
+      console.log(`Check Solana devnet explorer: https://explorer.solana.com/address/${RECIPIENT}?cluster=devnet`);
+    }
   } else {
     throw new Error('Transaction failed');
   }
